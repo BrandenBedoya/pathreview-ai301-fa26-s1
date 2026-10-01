@@ -94,6 +94,10 @@ class GitHubTool(BaseTool):
             "has_readme": self._has_readme(username, repo_name),
             "topics": repo_json.get("topics", []),
             "homepage": repo_json.get("homepage") or "",
+            # RepoAnalyzer's CI, test, and tech-stack detectors read this key
+            "file_structure": self._fetch_file_structure(
+                username, repo_name, repo_json.get("default_branch") or "HEAD"
+            ),
         }
 
         logger.info(
@@ -127,3 +131,39 @@ class GitHubTool(BaseTool):
             return response.status_code == 200
         except Exception:
             return False
+
+    def _fetch_file_structure(self, username: str, repo_name: str, branch: str) -> str:
+        """Fetch every path in the repository as a newline-joined string.
+
+        Uses the git trees API with ``recursive=1``. Both blob and tree entries are
+        included, so directories such as ``.github/workflows`` appear even when empty.
+
+        Args:
+            username: GitHub username
+            repo_name: Repository name
+            branch: Branch, tag, or commit to list (normally the default branch)
+
+        Returns:
+            Newline-joined paths, or an empty string if the tree cannot be fetched
+        """
+        url = f"{self.base_url}/repos/{username}/{repo_name}/git/trees/{branch}"
+
+        headers = {}
+        if self.api_token:
+            headers["Authorization"] = f"token {self.api_token}"
+
+        try:
+            response = httpx.get(url, headers=headers, params={"recursive": "1"}, timeout=10.0)
+            response.raise_for_status()
+            tree_json = response.json()
+        except Exception as e:
+            logger.warning(
+                "github_tree_fetch_failed", username=username, repo=repo_name, error=str(e)
+            )
+            return ""
+
+        if tree_json.get("truncated"):
+            # GitHub caps recursive trees on very large repos; keep the partial list
+            logger.warning("github_tree_truncated", username=username, repo=repo_name)
+
+        return "\n".join(entry["path"] for entry in tree_json.get("tree", []) if "path" in entry)
